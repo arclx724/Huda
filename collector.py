@@ -100,20 +100,19 @@ async def scan_group(client, dialog, targets: dict, semaphore: asyncio.Semaphore
                         targets[user.id]["found_in"].append(group_name)
 
             # ── Extra bots (non-admin) ───────────────
-            async for user in client.iter_participants(dialog.entity):
-                if user.bot and user.id not in targets:
-                    if user.id in all_whitelist:
-                        continue
-                    targets[user.id] = {
-                        "id": user.id,
-                        "first_name": user.first_name or "",
-                        "last_name": user.last_name or "",
-                        "username": user.username or "",
-                        "is_bot": True,
-                        "found_in": [group_name]
-                    }
-                    found_count += 1
-                    logger.info(f"   🤖 Bot: @{user.username or user.first_name} — {group_name}")
+#            async for user in client.iter_participants(dialog.entity):
+#                if user.bot and user.id not in targets:
+#                    if user.id in all_whitelist:
+#                        continue
+#                    targets[user.id] = {
+#                        "id": user.id,                        "first_name": user.first_name or "",
+#                        "last_name": user.last_name or "",
+#                        "username": user.username or "",
+#                        "is_bot": True,
+#                        "found_in": [group_name]
+#                    }
+#                    found_count += 1
+#                    logger.info(f"   🤖 Bot: @{user.username or user.first_name} — {group_name}")
 
             logger.info(f"✅ Scanned: {group_name} ({found_count} new targets)")
             return True, found_count
