@@ -154,7 +154,7 @@ async def collect_targets(client, all_whitelist: set):
     # Saare dialogs collect karo
     dialogs = []
     async for dialog in client.iter_dialogs():
-        if not (dialog.is_group or dialog.is_channel):
+        if not dialog.is_group:
             continue
 
         # Apna channel skip karo
