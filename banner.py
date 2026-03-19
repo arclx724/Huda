@@ -4,13 +4,14 @@
 #   Features:
 #   ✅ Multiple accounts parallel banning
 #   ✅ Same API_ID/HASH — sirf alag phone numbers
-#   ✅ Non-members bhi ban honge (Telethon magic)
+#   ✅ Non-members bhi ban honge
 #   ✅ Adaptive delay per account
 #   ✅ Smart retry (3 attempts)
 #   ✅ Resume support
 #   ✅ Progress bar
 #   ✅ Failed users tracking
 #   ✅ Telegram notifications
+#   ✅ Auto phone — terminal mein nahi puchega
 # ═══════════════════════════════════════════════
 
 import asyncio
@@ -27,18 +28,18 @@ from telethon.errors import (
     ChatAdminRequiredError, UserIdInvalidError
 )
 from config import (
-    API_ID, API_HASH,
+    API_ID, API_HASH, PHONE, SESSION,
+    EXTRA_PHONES,
     TARGETS_FILE, RESULTS_FILE, PROGRESS_FILE, FAILED_FILE,
     BASE_DELAY, FLOOD_INCREASE, FLOOD_DECREASE,
     MIN_DELAY, MAX_DELAY, SUCCESS_THRESHOLD, MAX_RETRIES,
-    WHITELIST_IDS, NOTIFY_EVERY,
-    EXTRA_PHONES
+    WHITELIST_IDS, NOTIFY_EVERY
 )
 from notifier import notify_start, notify_progress, notify_complete, notify_error
 
 logger = logging.getLogger(__name__)
 
-# Channel ban rights — permanent, view bhi nahi kar sakta
+# Permanent ban — view bhi nahi kar sakta
 BAN_RIGHTS = ChatBannedRights(
     until_date=None,
     view_messages=True,
@@ -46,7 +47,7 @@ BAN_RIGHTS = ChatBannedRights(
 
 
 # ═══════════════════════════════════════════════
-#   Adaptive Delay — Per Account
+#   Adaptive Delay
 # ═══════════════════════════════════════════════
 class AdaptiveDelay:
     def __init__(self, name):
@@ -119,7 +120,7 @@ class ProgressManager:
 
 
 # ═══════════════════════════════════════════════
-#   Shared Stats — Thread safe
+#   Shared Stats
 # ═══════════════════════════════════════════════
 class SharedStats:
     def __init__(self, total):
@@ -158,18 +159,7 @@ class SharedStats:
 #   Single Account Worker
 # ═══════════════════════════════════════════════
 async def account_worker(phone, session_name, channel_id, chunk, progress, stats, failed_list):
-    """
-    Ek account ka worker — apna chunk ban karta hai.
-
-    Args:
-        phone: Phone number
-        session_name: Unique session file name
-        channel_id: Channel username ya ID
-        chunk: List of users to ban
-        progress: ProgressManager
-        stats: SharedStats
-        failed_list: Shared failed list
-    """
+    """Ek account ka worker"""
     adaptive = AdaptiveDelay(phone)
     acc_banned = 0
     acc_skipped = 0
@@ -178,104 +168,115 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
     logger.info(f"[{phone}] 🚀 Starting — {len(chunk)} users")
 
     try:
-        async with TelegramClient(session_name, API_ID, API_HASH) as client:
-            await client.start(phone=phone)
-            me = await client.get_me()
-            logger.info(f"[{phone}] ✅ Login: {me.first_name}")
+        client = TelegramClient(session_name, API_ID, API_HASH)
 
-            # Channel entity fetch
-            try:
-                channel = await client.get_entity(channel_id)
-            except Exception as e:
-                logger.error(f"[{phone}] ❌ Channel nahi mila: {e}")
-                return {"phone": phone, "banned": 0, "skipped": len(chunk), "error": str(e)}
+        # ── Auto login — terminal mein nahi puchega ──
+        await client.start(phone=lambda: phone)
 
-            for user in chunk:
-                user_id = user["id"]
+        me = await client.get_me()
+        logger.info(f"[{phone}] ✅ Login: {me.first_name}")
 
-                # Already done? Skip
-                if progress.is_done(user_id):
-                    continue
+        # Channel entity fetch
+        try:
+            channel = await client.get_entity(channel_id)
+        except Exception as e:
+            logger.error(f"[{phone}] ❌ Channel nahi mila: {e}")
+            await client.disconnect()
+            return {
+                "phone": phone,
+                "banned": 0,
+                "skipped": len(chunk),
+                "total_floods": 0,
+                "error": str(e)
+            }
 
-                # Whitelist check
-                if user_id in WHITELIST_IDS:
+        for user in chunk:
+            user_id = user["id"]
+
+            # Already done? Skip
+            if progress.is_done(user_id):
+                continue
+
+            # Whitelist check
+            if user_id in WHITELIST_IDS:
+                await progress.mark_done(user_id)
+                continue
+
+            name = f"{user['first_name']} {user['last_name']}".strip() or "Unknown"
+            success = False
+            last_error = ""
+
+            # ── Smart Retry Loop ─────────────────────
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    await client(EditBannedRequest(channel, user_id, BAN_RIGHTS))
+                    success = True
+                    acc_banned += 1
+                    adaptive.on_success()
                     await progress.mark_done(user_id)
-                    continue
+                    await stats.add_banned()
 
-                name = f"{user['first_name']} {user['last_name']}".strip() or "Unknown"
-                success = False
+                    tag = "🤖" if user.get("is_bot") else "👑"
+                    logger.info(f"[{phone}] {tag} ✅ {name} | {adaptive.status()}")
 
-                # ── Smart Retry Loop ─────────────────
-                for attempt in range(1, MAX_RETRIES + 1):
-                    try:
-                        await client(EditBannedRequest(channel, user_id, BAN_RIGHTS))
-                        success = True
-                        acc_banned += 1
-                        adaptive.on_success()
-                        await progress.mark_done(user_id)
-                        await stats.add_banned()
+                    notification_counter += 1
+                    if notification_counter % NOTIFY_EVERY == 0:
+                        asyncio.create_task(
+                            notify_progress(stats.banned, stats.total, stats.floods)
+                        )
+                    break
 
-                        tag = "🤖" if user.get("is_bot") else "👑"
-                        logger.info(f"[{phone}] {tag} ✅ {name} | {adaptive.status()}")
+                except FloodWaitError as e:
+                    wait = e.seconds
+                    logger.warning(f"[{phone}] 🌊 FloodWait {wait}s (attempt {attempt})")
+                    adaptive.on_flood()
+                    await stats.add_flood()
+                    await asyncio.sleep(wait + 3)
 
-                        notification_counter += 1
-                        if notification_counter % NOTIFY_EVERY == 0:
-                            asyncio.create_task(
-                                notify_progress(stats.banned, stats.total, stats.floods)
-                            )
-                        break
-
-                    except FloodWaitError as e:
-                        wait = e.seconds
-                        logger.warning(f"[{phone}] 🌊 FloodWait {wait}s (attempt {attempt})")
-                        adaptive.on_flood()
-                        await stats.add_flood()
-                        await asyncio.sleep(wait + 3)
-                        # Retry loop continue karega
-
-                    except UserAdminInvalidError:
-                        # User is admin — skip karo
-                        logger.debug(f"[{phone}] Skip (admin): {name}")
-                        await progress.mark_done(user_id)
-                        acc_skipped += 1
-                        await stats.add_skipped()
-                        success = True
-                        break
-
-                    except UserIdInvalidError:
-                        # Invalid user — skip
-                        logger.warning(f"[{phone}] Skip (invalid ID): {name}")
-                        await progress.mark_done(user_id)
-                        acc_skipped += 1
-                        await stats.add_skipped()
-                        success = True
-                        break
-
-                    except ChatAdminRequiredError:
-                        logger.error(f"[{phone}] ❌ Channel admin nahi hai! Ban karna possible nahi.")
-                        return {
-                            "phone": phone,
-                            "banned": acc_banned,
-                            "skipped": acc_skipped,
-                            "total_floods": adaptive.total_flood,
-                            "error": "Not admin in channel"
-                        }
-
-                    except Exception as e:
-                        error_str = str(e)
-                        logger.debug(f"[{phone}] Attempt {attempt} fail: {name} — {error_str}")
-                        adaptive.on_error()
-                        if attempt < MAX_RETRIES:
-                            await asyncio.sleep(adaptive.delay * attempt)
-
-                # Saare retries fail
-                if not success:
-                    logger.warning(f"[{phone}] ❌ All retries fail: {name}")
-                    failed_list.append({**user, "error": "All retries failed"})
+                except UserAdminInvalidError:
+                    logger.debug(f"[{phone}] Skip (admin): {name}")
+                    await progress.mark_done(user_id)
                     acc_skipped += 1
                     await stats.add_skipped()
+                    success = True
+                    break
 
-                await adaptive.wait()
+                except UserIdInvalidError:
+                    logger.debug(f"[{phone}] Skip (invalid ID): {name}")
+                    await progress.mark_done(user_id)
+                    acc_skipped += 1
+                    await stats.add_skipped()
+                    success = True
+                    break
+
+                except ChatAdminRequiredError:
+                    logger.error(f"[{phone}] ❌ Account channel ka admin nahi hai!")
+                    await client.disconnect()
+                    return {
+                        "phone": phone,
+                        "banned": acc_banned,
+                        "skipped": acc_skipped,
+                        "total_floods": adaptive.total_flood,
+                        "error": "Not admin in channel"
+                    }
+
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning(f"[{phone}] Attempt {attempt} fail: {name} — {last_error}")
+                    adaptive.on_error()
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(adaptive.delay * attempt)
+
+            # Saare retries fail
+            if not success:
+                logger.warning(f"[{phone}] ❌ All retries fail: {name} — {last_error}")
+                failed_list.append({**user, "error": last_error})
+                acc_skipped += 1
+                await stats.add_skipped()
+
+            await adaptive.wait()
+
+        await client.disconnect()
 
     except Exception as e:
         logger.error(f"[{phone}] ❌ Account error: {e}")
@@ -318,16 +319,19 @@ async def run_banner():
         data = json.load(f)
 
     targets = data["targets"]
-    channel_id = data["channel"]  # Username use karenge — reliable hai
+    channel_id = data["channel"]
 
-    # ── All accounts setup ────────────────────────
-    # Main account + extra accounts
-    from config import PHONE
+    # ── All accounts ──────────────────────────────
+    # Index 0 = main account (collector_session)
+    # Index 1,2,3... = extra accounts (session_1, session_2...)
     all_phones = [PHONE] + EXTRA_PHONES
+    session_names = [SESSION] + [f"session_{i+1}" for i in range(len(EXTRA_PHONES))]
 
     logger.info(f"📢 Channel  : {channel_id}")
     logger.info(f"👥 Targets  : {len(targets)}")
     logger.info(f"📱 Accounts : {len(all_phones)}")
+    for i, phone in enumerate(all_phones):
+        logger.info(f"   [{i+1}] {phone} → {session_names[i]}.session")
 
     # ── Progress manager ─────────────────────────
     progress = ProgressManager()
@@ -344,12 +348,12 @@ async def run_banner():
     logger.info(f"\n🚀 Auto ban shuru — {len(remaining)} users, {len(all_phones)} accounts\n")
 
     # ── Divide chunks ────────────────────────────
-    n_accounts = len(all_phones)
-    chunk_size = len(remaining) // n_accounts
+    n = len(all_phones)
+    chunk_size = len(remaining) // n
     chunks = []
-    for i in range(n_accounts):
+    for i in range(n):
         start = i * chunk_size
-        end = start + chunk_size if i < n_accounts - 1 else len(remaining)
+        end = start + chunk_size if i < n - 1 else len(remaining)
         chunks.append(remaining[start:end])
 
     logger.info(f"📦 Chunk distribution:")
@@ -362,20 +366,19 @@ async def run_banner():
 
     # ── Run all accounts parallel ─────────────────
     start_time = time.time()
-    logger.info(f"\n🚀 {n_accounts} accounts parallel mein start...\n")
+    logger.info(f"\n🚀 {n} accounts parallel mein start...\n")
 
-    from config import SESSION
-tasks = [
-    account_worker(
-        phone=all_phones[i],
-        session_name=f"session_{i}",
+    tasks = [
+        account_worker(
+            phone=all_phones[i],
+            session_name=session_names[i],
             channel_id=channel_id,
             chunk=chunks[i],
             progress=progress,
             stats=stats,
             failed_list=failed_list
         )
-        for i in range(n_accounts)
+        for i in range(n)
     ]
 
     account_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -406,7 +409,6 @@ tasks = [
             acc_results[r["phone"]] = r
             logger.info(f"   📱 {r['phone']}: Banned={r.get('banned',0)} Skipped={r.get('skipped',0)}")
 
-    # Save results
     final = {
         "channel": channel_id,
         "total_targets": len(targets),
@@ -428,4 +430,4 @@ tasks = [
 
 if __name__ == "__main__":
     asyncio.run(run_banner())
-    
+                
