@@ -244,7 +244,7 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
 
                     except UserIdInvalidError:
                         # Invalid user — skip
-                        logger.debug(f"[{phone}] Skip (invalid ID): {name}")
+                        logger.warning(f"[{phone}] Skip (invalid ID): {name}")
                         await progress.mark_done(user_id)
                         acc_skipped += 1
                         await stats.add_skipped()
