@@ -1,18 +1,14 @@
 # ═══════════════════════════════════════════════
-#   banner.py — Multi-Account Telethon Banner
+#   banner.py — Multi-Account Telethon Banner v4
 #
-#   Features:
-#   ✅ Multiple accounts parallel banning
-#   ✅ Same API_ID/HASH — sirf alag phone numbers
-#   ✅ Non-members bhi ban honge
-#   ✅ User entity resolve — PeerUser error fix
-#   ✅ Adaptive delay per account
-#   ✅ Smart retry (3 attempts)
+#   Fix:
+#   ✅ access_hash use karta hai — participant invalid error fix
+#   ✅ InputPeerUser(id, access_hash) se ban karta hai
+#   ✅ Multiple accounts parallel
+#   ✅ Adaptive delay
+#   ✅ Smart retry
 #   ✅ Resume support
 #   ✅ Progress bar
-#   ✅ Failed users tracking
-#   ✅ Telegram notifications
-#   ✅ Auto phone — terminal mein nahi puchega
 # ═══════════════════════════════════════════════
 
 import asyncio
@@ -40,7 +36,6 @@ from notifier import notify_start, notify_progress, notify_complete, notify_erro
 
 logger = logging.getLogger(__name__)
 
-# Permanent ban
 BAN_RIGHTS = ChatBannedRights(
     until_date=None,
     view_messages=True,
@@ -114,11 +109,6 @@ class ProgressManager:
     def is_done(self, user_id):
         return user_id in self.done_ids
 
-    def clear(self):
-        self.done_ids = set()
-        if os.path.exists(PROGRESS_FILE):
-            os.remove(PROGRESS_FILE)
-
 
 # ═══════════════════════════════════════════════
 #   Shared Stats
@@ -157,43 +147,22 @@ class SharedStats:
 
 
 # ═══════════════════════════════════════════════
-#   User Entity Resolver
+#   Build User Entity from saved data
 # ═══════════════════════════════════════════════
-async def resolve_user(client, user):
+def build_user_entity(user: dict):
     """
-    User entity resolve karta hai.
-    Pehle username se try karta hai, phir ID se.
-    Isse PeerUser error fix hota hai.
+    Saved user data se InputPeerUser banata hai.
+    access_hash use karta hai — participant invalid error fix!
     """
-    # Username se try karo — sabse reliable
-    if user.get("username"):
-        try:
-            return await client.get_input_entity(f"@{user['username']}")
-        except Exception:
-            pass
-
-    # Direct ID se try karo
     user_id = user["id"]
-    try:
-        return await client.get_input_entity(user_id)
-    except Exception:
-        pass
-
-    # Last resort — InputPeerUser manually banao
-    # access_hash 0 use karte hain — kuch cases mein kaam karta hai
-    try:
-        return InputPeerUser(user_id=user_id, access_hash=0)
-    except Exception:
-        pass
-
-    return None
+    access_hash = user.get("access_hash", 0)
+    return InputPeerUser(user_id=user_id, access_hash=access_hash)
 
 
 # ═══════════════════════════════════════════════
 #   Single Account Worker
 # ═══════════════════════════════════════════════
 async def account_worker(phone, session_name, channel_id, chunk, progress, stats, failed_list):
-    """Ek account ka worker"""
     adaptive = AdaptiveDelay(phone)
     acc_banned = 0
     acc_skipped = 0
@@ -208,28 +177,20 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
         me = await client.get_me()
         logger.info(f"[{phone}] ✅ Login: {me.first_name}")
 
-        # Channel entity fetch
+        # Channel entity
         try:
             channel = await client.get_input_entity(channel_id)
         except Exception as e:
             logger.error(f"[{phone}] ❌ Channel nahi mila: {e}")
             await client.disconnect()
-            return {
-                "phone": phone,
-                "banned": 0,
-                "skipped": len(chunk),
-                "total_floods": 0,
-                "error": str(e)
-            }
+            return {"phone": phone, "banned": 0, "skipped": len(chunk), "total_floods": 0, "error": str(e)}
 
         for user in chunk:
             user_id = user["id"]
 
-            # Already done? Skip
             if progress.is_done(user_id):
                 continue
 
-            # Whitelist check
             if user_id in WHITELIST_IDS:
                 await progress.mark_done(user_id)
                 continue
@@ -238,14 +199,8 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
             success = False
             last_error = ""
 
-            # ── User entity resolve ──────────────────
-            user_entity = await resolve_user(client, user)
-            if user_entity is None:
-                logger.warning(f"[{phone}] ⚠️ Entity resolve fail, skip: {name}")
-                failed_list.append({**user, "error": "Entity resolve failed"})
-                acc_skipped += 1
-                await stats.add_skipped()
-                continue
+            # ── Build entity with access_hash ────────
+            user_entity = build_user_entity(user)
 
             # ── Smart Retry Loop ─────────────────────
             for attempt in range(1, MAX_RETRIES + 1):
@@ -269,13 +224,13 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
 
                 except FloodWaitError as e:
                     wait = e.seconds
-                    logger.warning(f"[{phone}] 🌊 FloodWait {wait}s (attempt {attempt})")
+                    logger.warning(f"[{phone}] 🌊 FloodWait {wait}s")
                     adaptive.on_flood()
                     await stats.add_flood()
                     await asyncio.sleep(wait + 3)
 
                 except UserAdminInvalidError:
-                    logger.debug(f"[{phone}] Skip (channel admin hai): {name}")
+                    # Channel ka admin hai — skip
                     await progress.mark_done(user_id)
                     acc_skipped += 1
                     await stats.add_skipped()
@@ -283,7 +238,6 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
                     break
 
                 except UserIdInvalidError:
-                    logger.debug(f"[{phone}] Skip (invalid ID): {name}")
                     await progress.mark_done(user_id)
                     acc_skipped += 1
                     await stats.add_skipped()
@@ -291,26 +245,25 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
                     break
 
                 except ChatAdminRequiredError:
-                    logger.error(f"[{phone}] ❌ Account channel ka admin nahi hai!")
+                    logger.error(f"[{phone}] ❌ Channel admin nahi hai!")
                     await client.disconnect()
                     return {
                         "phone": phone,
                         "banned": acc_banned,
                         "skipped": acc_skipped,
                         "total_floods": adaptive.total_flood,
-                        "error": "Not admin in channel"
+                        "error": "Not admin"
                     }
 
                 except Exception as e:
                     last_error = str(e)
-                    logger.warning(f"[{phone}] Attempt {attempt} fail: {name} — {last_error}")
+                    logger.warning(f"[{phone}] Attempt {attempt}: {name} — {last_error}")
                     adaptive.on_error()
                     if attempt < MAX_RETRIES:
                         await asyncio.sleep(adaptive.delay * attempt)
 
-            # Saare retries fail
             if not success:
-                logger.warning(f"[{phone}] ❌ All retries fail: {name} — {last_error}")
+                logger.warning(f"[{phone}] ❌ Failed: {name} — {last_error}")
                 failed_list.append({**user, "error": last_error})
                 acc_skipped += 1
                 await stats.add_skipped()
@@ -320,24 +273,11 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
         await client.disconnect()
 
     except Exception as e:
-        logger.error(f"[{phone}] ❌ Account error: {e}")
-        return {
-            "phone": phone,
-            "banned": acc_banned,
-            "skipped": acc_skipped,
-            "total_floods": adaptive.total_flood,
-            "error": str(e)
-        }
+        logger.error(f"[{phone}] ❌ Error: {e}")
+        return {"phone": phone, "banned": acc_banned, "skipped": acc_skipped, "total_floods": adaptive.total_flood, "error": str(e)}
 
     logger.info(f"[{phone}] 🏁 Done! Banned={acc_banned} Skipped={acc_skipped} Floods={adaptive.total_flood}")
-
-    return {
-        "phone": phone,
-        "banned": acc_banned,
-        "skipped": acc_skipped,
-        "total_floods": adaptive.total_flood,
-        "final_delay": adaptive.delay
-    }
+    return {"phone": phone, "banned": acc_banned, "skipped": acc_skipped, "total_floods": adaptive.total_flood, "final_delay": adaptive.delay}
 
 
 # ═══════════════════════════════════════════════
@@ -348,12 +288,11 @@ async def run_banner():
     setup_logger()
 
     logger.info("═" * 55)
-    logger.info("   🚫 Multi-Account Telethon Banner v3")
+    logger.info("   🚫 Multi-Account Banner v4 — access_hash fix")
     logger.info("═" * 55)
 
-    # ── Load targets ─────────────────────────────
     if not os.path.exists(TARGETS_FILE):
-        logger.error(f"❌ {TARGETS_FILE} nahi mila! Pehle collector chalao.")
+        logger.error(f"❌ {TARGETS_FILE} nahi mila!")
         return
 
     with open(TARGETS_FILE, "r", encoding="utf-8") as f:
@@ -362,31 +301,32 @@ async def run_banner():
     targets = data["targets"]
     channel_id = data["channel"]
 
-    # ── All accounts ──────────────────────────────
+    # access_hash stats
+    with_hash = sum(1 for t in targets if t.get("access_hash", 0) != 0)
+    logger.info(f"🔑 access_hash available: {with_hash}/{len(targets)} users")
+
+    if with_hash == 0:
+        logger.warning("⚠️  Kisi ke paas access_hash nahi! Pehle collector dobara chalao (Option 2)")
+
     all_phones = [PHONE] + EXTRA_PHONES
     session_names = [SESSION] + [f"session_{i+1}" for i in range(len(EXTRA_PHONES))]
 
     logger.info(f"📢 Channel  : {channel_id}")
     logger.info(f"👥 Targets  : {len(targets)}")
     logger.info(f"📱 Accounts : {len(all_phones)}")
-    for i, phone in enumerate(all_phones):
-        logger.info(f"   [{i+1}] {phone} → {session_names[i]}.session")
 
-    # ── Progress manager ─────────────────────────
     progress = ProgressManager()
     remaining = [t for t in targets if not progress.is_done(t["id"])]
 
-    logger.info(f"📊 Remaining: {len(remaining)} (done: {len(targets) - len(remaining)})")
+    logger.info(f"📊 Remaining: {len(remaining)}")
 
     if not remaining:
         logger.info("✅ Saare users pehle se ban hain!")
         return
 
-    # ── Notify ───────────────────────────────────
     await notify_start(len(remaining), len(all_phones))
-    logger.info(f"\n🚀 Auto ban shuru — {len(remaining)} users, {len(all_phones)} accounts\n")
 
-    # ── Divide chunks ────────────────────────────
+    # Chunks divide
     n = len(all_phones)
     chunk_size = len(remaining) // n
     chunks = []
@@ -395,17 +335,15 @@ async def run_banner():
         end = start + chunk_size if i < n - 1 else len(remaining)
         chunks.append(remaining[start:end])
 
-    logger.info(f"📦 Chunk distribution:")
+    logger.info(f"\n📦 Distribution:")
     for i, phone in enumerate(all_phones):
         logger.info(f"   {phone}: {len(chunks[i])} users")
 
-    # ── Shared objects ────────────────────────────
     stats = SharedStats(len(remaining))
     failed_list = []
 
-    # ── Run all accounts parallel ─────────────────
     start_time = time.time()
-    logger.info(f"\n🚀 {n} accounts parallel mein start...\n")
+    logger.info(f"\n🚀 {n} accounts parallel start...\n")
 
     tasks = [
         account_worker(
@@ -425,48 +363,43 @@ async def run_banner():
 
     elapsed = time.time() - start_time
 
-    # ── Save failed ───────────────────────────────
     if failed_list:
         with open(FAILED_FILE, "w", encoding="utf-8") as f:
             json.dump(failed_list, f, ensure_ascii=False, indent=2)
-        logger.warning(f"⚠️  {len(failed_list)} failed: {FAILED_FILE}")
+        logger.warning(f"⚠️  {len(failed_list)} failed saved")
 
     progress.save()
 
-    # ── Summary ───────────────────────────────────
     logger.info(f"\n{'═' * 55}")
     logger.info(f"✅ ALL DONE!")
-    logger.info(f"   ✔️  Banned   : {stats.banned}")
-    logger.info(f"   ⏭️  Skipped  : {stats.skipped}")
-    logger.info(f"   ❌ Failed   : {len(failed_list)}")
-    logger.info(f"   🌊 Floods   : {stats.floods}")
-    logger.info(f"   ⏱️  Time     : {elapsed/60:.1f} minutes")
+    logger.info(f"   ✔️  Banned  : {stats.banned}")
+    logger.info(f"   ⏭️  Skipped : {stats.skipped}")
+    logger.info(f"   ❌ Failed  : {len(failed_list)}")
+    logger.info(f"   🌊 Floods  : {stats.floods}")
+    logger.info(f"   ⏱️  Time    : {elapsed/60:.1f} min")
 
     acc_results = {}
     for r in account_results:
         if isinstance(r, dict):
             acc_results[r["phone"]] = r
-            logger.info(f"   📱 {r['phone']}: Banned={r.get('banned',0)} Skipped={r.get('skipped',0)}")
-
-    final = {
-        "channel": channel_id,
-        "total_targets": len(targets),
-        "total_banned": stats.banned,
-        "total_skipped": stats.skipped,
-        "total_failed": len(failed_list),
-        "total_floods": stats.floods,
-        "time_minutes": elapsed / 60,
-        "account_results": acc_results
-    }
+            logger.info(f"   📱 {r['phone']}: ✅{r.get('banned',0)} ⏭️{r.get('skipped',0)}")
 
     with open(RESULTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(final, f, ensure_ascii=False, indent=2)
+        json.dump({
+            "channel": channel_id,
+            "total_targets": len(targets),
+            "total_banned": stats.banned,
+            "total_skipped": stats.skipped,
+            "total_failed": len(failed_list),
+            "total_floods": stats.floods,
+            "time_minutes": elapsed / 60,
+            "account_results": acc_results
+        }, f, ensure_ascii=False, indent=2)
 
     await notify_complete(stats.banned, stats.skipped, stats.floods, elapsed / 60)
-    logger.info(f"💾 Results: {RESULTS_FILE}")
     logger.info(f"🔒 Ye log ab tumhara channel nahi dekh payenge!")
 
 
 if __name__ == "__main__":
     asyncio.run(run_banner())
-    
+                        
