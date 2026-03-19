@@ -5,6 +5,7 @@
 #   ✅ Multiple accounts parallel banning
 #   ✅ Same API_ID/HASH — sirf alag phone numbers
 #   ✅ Non-members bhi ban honge
+#   ✅ User entity resolve — PeerUser error fix
 #   ✅ Adaptive delay per account
 #   ✅ Smart retry (3 attempts)
 #   ✅ Resume support
@@ -22,7 +23,7 @@ import logging
 from tqdm import tqdm
 from telethon import TelegramClient
 from telethon.tl.functions.channels import EditBannedRequest
-from telethon.tl.types import ChatBannedRights
+from telethon.tl.types import ChatBannedRights, InputPeerUser
 from telethon.errors import (
     FloodWaitError, UserAdminInvalidError,
     ChatAdminRequiredError, UserIdInvalidError
@@ -39,7 +40,7 @@ from notifier import notify_start, notify_progress, notify_complete, notify_erro
 
 logger = logging.getLogger(__name__)
 
-# Permanent ban — view bhi nahi kar sakta
+# Permanent ban
 BAN_RIGHTS = ChatBannedRights(
     until_date=None,
     view_messages=True,
@@ -156,6 +157,39 @@ class SharedStats:
 
 
 # ═══════════════════════════════════════════════
+#   User Entity Resolver
+# ═══════════════════════════════════════════════
+async def resolve_user(client, user):
+    """
+    User entity resolve karta hai.
+    Pehle username se try karta hai, phir ID se.
+    Isse PeerUser error fix hota hai.
+    """
+    # Username se try karo — sabse reliable
+    if user.get("username"):
+        try:
+            return await client.get_input_entity(f"@{user['username']}")
+        except Exception:
+            pass
+
+    # Direct ID se try karo
+    user_id = user["id"]
+    try:
+        return await client.get_input_entity(user_id)
+    except Exception:
+        pass
+
+    # Last resort — InputPeerUser manually banao
+    # access_hash 0 use karte hain — kuch cases mein kaam karta hai
+    try:
+        return InputPeerUser(user_id=user_id, access_hash=0)
+    except Exception:
+        pass
+
+    return None
+
+
+# ═══════════════════════════════════════════════
 #   Single Account Worker
 # ═══════════════════════════════════════════════
 async def account_worker(phone, session_name, channel_id, chunk, progress, stats, failed_list):
@@ -169,8 +203,6 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
 
     try:
         client = TelegramClient(session_name, API_ID, API_HASH)
-
-        # ── Auto login — terminal mein nahi puchega ──
         await client.start(phone=lambda: phone)
 
         me = await client.get_me()
@@ -178,7 +210,7 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
 
         # Channel entity fetch
         try:
-            channel = await client.get_entity(channel_id)
+            channel = await client.get_input_entity(channel_id)
         except Exception as e:
             logger.error(f"[{phone}] ❌ Channel nahi mila: {e}")
             await client.disconnect()
@@ -206,10 +238,19 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
             success = False
             last_error = ""
 
+            # ── User entity resolve ──────────────────
+            user_entity = await resolve_user(client, user)
+            if user_entity is None:
+                logger.warning(f"[{phone}] ⚠️ Entity resolve fail, skip: {name}")
+                failed_list.append({**user, "error": "Entity resolve failed"})
+                acc_skipped += 1
+                await stats.add_skipped()
+                continue
+
             # ── Smart Retry Loop ─────────────────────
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
-                    await client(EditBannedRequest(channel, user_id, BAN_RIGHTS))
+                    await client(EditBannedRequest(channel, user_entity, BAN_RIGHTS))
                     success = True
                     acc_banned += 1
                     adaptive.on_success()
@@ -234,7 +275,7 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
                     await asyncio.sleep(wait + 3)
 
                 except UserAdminInvalidError:
-                    logger.debug(f"[{phone}] Skip (admin): {name}")
+                    logger.debug(f"[{phone}] Skip (channel admin hai): {name}")
                     await progress.mark_done(user_id)
                     acc_skipped += 1
                     await stats.add_skipped()
@@ -307,7 +348,7 @@ async def run_banner():
     setup_logger()
 
     logger.info("═" * 55)
-    logger.info("   🚫 Multi-Account Telethon Banner")
+    logger.info("   🚫 Multi-Account Telethon Banner v3")
     logger.info("═" * 55)
 
     # ── Load targets ─────────────────────────────
@@ -322,8 +363,6 @@ async def run_banner():
     channel_id = data["channel"]
 
     # ── All accounts ──────────────────────────────
-    # Index 0 = main account (collector_session)
-    # Index 1,2,3... = extra accounts (session_1, session_2...)
     all_phones = [PHONE] + EXTRA_PHONES
     session_names = [SESSION] + [f"session_{i+1}" for i in range(len(EXTRA_PHONES))]
 
@@ -430,4 +469,4 @@ async def run_banner():
 
 if __name__ == "__main__":
     asyncio.run(run_banner())
-                
+    
