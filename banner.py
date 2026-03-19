@@ -333,8 +333,8 @@ async def run_banner():
     logger.info(f"🔑 With hash : {with_hash} (ban honge)")
     logger.info(f"⚠️  No hash   : {without_hash} (skip)")
 
-    all_phones = [PHONE] + EXTRA_PHONES
-    session_names = [SESSION] + [f"session_{i+1}" for i in range(len(EXTRA_PHONES))]
+    all_phones = [PHONE]
+    session_names = [SESSION]
     logger.info(f"📱 Accounts  : {len(all_phones)}")
 
     # Progress
@@ -375,6 +375,7 @@ async def run_banner():
             results=acc_results
         )
         for i in range(len(all_phones))
+        
     ]
 
     await asyncio.gather(*tasks)
