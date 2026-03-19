@@ -410,10 +410,10 @@ async def run_banner():
         return
 
     # ── Confirm ──────────────────────────────────
-    confirm = input(f"\nConfirm: {len(remaining)} users ko {len(healthy_bots)} bots se ban karna hai? (yes/no): ")
-    if confirm.lower() not in ["yes", "y", "haan", "ha"]:
-        logger.info("❌ Cancel.")
-        return
+#    confirm = input(f"\nConfirm: {len(remaining)} users ko {len(healthy_bots)} bots se ban karna hai? (yes/no): ")
+#    if confirm.lower() not in ["yes", "y", "haan", "ha"]:
+#        logger.info("❌ Cancel.")
+#        return
 
     # ── Notify start ─────────────────────────────
     await notify_start(len(remaining), len(healthy_bots))
