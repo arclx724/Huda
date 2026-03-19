@@ -364,10 +364,11 @@ async def run_banner():
     start_time = time.time()
     logger.info(f"\n🚀 {n_accounts} accounts parallel mein start...\n")
 
-    tasks = [
-        account_worker(
-            phone=all_phones[i],
-            session_name=f"session_{i}",
+    from config import SESSION
+tasks = [
+    account_worker(
+        phone=all_phones[i],
+        session_name=SESSION if i == 0 else f"session_{i}",
             channel_id=channel_id,
             chunk=chunks[i],
             progress=progress,
