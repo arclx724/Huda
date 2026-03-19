@@ -368,7 +368,7 @@ async def run_banner():
 tasks = [
     account_worker(
         phone=all_phones[i],
-        session_name=SESSION if i == 0 else f"session_{i}",
+        session_name=f"session_{i}",
             channel_id=channel_id,
             chunk=chunks[i],
             progress=progress,
