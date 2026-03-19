@@ -113,7 +113,7 @@ async def scan_group(client, dialog, targets: dict, semaphore: asyncio.Semaphore
 #                    }
 #                    found_count += 1
 #                    logger.info(f"   🤖 Bot: @{user.username or user.first_name} — {group_name}")
-
+            await asyncio.sleep(2)
             logger.info(f"✅ Scanned: {group_name} ({found_count} new targets)")
             return True, found_count
 
