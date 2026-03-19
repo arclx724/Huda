@@ -329,6 +329,7 @@ async def bot_worker(token, bot_username, channel_id, chunk, progress, stats, fa
 
                 else:
                     # Ignorable error?
+                    logger.warning(f"[SKIP REASON] {name}: {error}")
                     if any(e in str(error) for e in IGNORABLE):
                         await progress.mark_done(user_id)
                         bot_skipped += 1
