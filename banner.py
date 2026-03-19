@@ -1,9 +1,9 @@
 # ═══════════════════════════════════════════════
-#   banner.py — Multi-Account Telethon Banner v4
+#   banner.py — Multi-Account Telethon Banner v4.1
 #
 #   Fix:
 #   ✅ access_hash use karta hai — participant invalid error fix
-#   ✅ InputPeerUser(id, access_hash) se ban karta hai
+#   ✅ get_input_entity with InputPeerUser fallback
 #   ✅ Multiple accounts parallel
 #   ✅ Adaptive delay
 #   ✅ Smart retry
@@ -147,19 +147,6 @@ class SharedStats:
 
 
 # ═══════════════════════════════════════════════
-#   Build User Entity from saved data
-# ═══════════════════════════════════════════════
-def build_user_entity(user: dict):
-    """
-    Saved user data se InputPeerUser banata hai.
-    access_hash use karta hai — participant invalid error fix!
-    """
-    user_id = user["id"]
-    access_hash = user.get("access_hash", 0)
-    return InputPeerUser(user_id=user_id, access_hash=access_hash)
-
-
-# ═══════════════════════════════════════════════
 #   Single Account Worker
 # ═══════════════════════════════════════════════
 async def account_worker(phone, session_name, channel_id, chunk, progress, stats, failed_list):
@@ -199,8 +186,14 @@ async def account_worker(phone, session_name, channel_id, chunk, progress, stats
             success = False
             last_error = ""
 
-            # ── Build entity with access_hash ────────
-            user_entity = build_user_entity(user)
+            # ── Dynamic Entity Fetch with Fallback ────────
+            try:
+                user_entity = await client.get_input_entity(user["id"])
+            except Exception:
+                user_entity = InputPeerUser(
+                    user_id=user["id"],
+                    access_hash=user.get("access_hash", 0)
+                )
 
             # ── Smart Retry Loop ─────────────────────
             for attempt in range(1, MAX_RETRIES + 1):
@@ -288,7 +281,7 @@ async def run_banner():
     setup_logger()
 
     logger.info("═" * 55)
-    logger.info("   🚫 Multi-Account Banner v4 — access_hash fix")
+    logger.info("   🚫 Multi-Account Banner v4.1 — Entity Fix")
     logger.info("═" * 55)
 
     if not os.path.exists(TARGETS_FILE):
@@ -306,7 +299,7 @@ async def run_banner():
     logger.info(f"🔑 access_hash available: {with_hash}/{len(targets)} users")
 
     if with_hash == 0:
-        logger.warning("⚠️  Kisi ke paas access_hash nahi! Pehle collector dobara chalao (Option 2)")
+        logger.warning("⚠️  Kisi ke paas access_hash nahi! Pehle collector dobara chalao")
 
     all_phones = [PHONE] + EXTRA_PHONES
     session_names = [SESSION] + [f"session_{i+1}" for i in range(len(EXTRA_PHONES))]
@@ -402,4 +395,4 @@ async def run_banner():
 
 if __name__ == "__main__":
     asyncio.run(run_banner())
-                        
+    
